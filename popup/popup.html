@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Volume Drag</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <h1>Volume Drag</h1>
+          <span class="version">v1.0.0</span>
+        </div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="enabled-toggle" checked>
+        <span class="slider round"></span>
+      </label>
+    </header>
+
+    <!-- Preview Card -->
+    <div class="preview-section">
+      <div class="section-label">HUD Live Preview</div>
+      <div class="preview-card" id="preview-card">
+        <div class="preview-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+          </svg>
+        </div>
+        <div class="preview-body">
+          <div class="preview-top">
+            <div class="preview-waves" id="preview-waves">
+              <span class="p-bar" style="height: 6px;"></span>
+              <span class="p-bar" style="height: 12px;"></span>
+              <span class="p-bar" style="height: 16px;"></span>
+              <span class="p-bar" style="height: 10px;"></span>
+              <span class="p-bar" style="height: 14px;"></span>
+              <span class="p-bar" style="height: 8px;"></span>
+            </div>
+            <span class="preview-badge" id="preview-badge">75%</span>
+          </div>
+          <div class="preview-track">
+            <div class="preview-fill" id="preview-fill" style="width: 75%;">
+              <div class="preview-thumb"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Controls -->
+    <div class="settings-group">
+      <!-- Sensitivity -->
+      <div class="setting-item">
+        <div class="setting-header">
+          <label for="sensitivity-slider">Sensitivity (Viewport Width)</label>
+          <span class="value-badge" id="sensitivity-value">60%</span>
+        </div>
+        <input type="range" id="sensitivity-slider" min="30" max="100" step="5" value="60">
+        <p class="setting-hint">Drag distance needed for 0%–100% volume. Higher % = less sensitive (smoother control).</p>
+      </div>
+
+      <!-- Drag Trigger Selector -->
+      <div class="setting-item">
+        <label for="trigger-select">Mouse Drag Trigger</label>
+        <div class="select-wrap">
+          <select id="trigger-select">
+            <option value="left">Smart Left-Click Drag (Default)</option>
+            <option value="right">Right-Click Drag</option>
+            <option value="shift-left">Shift + Left Drag</option>
+            <option value="alt-left">Alt + Left Drag</option>
+          </select>
+        </div>
+        <p class="setting-hint">Smart Left Click preserves regular single clicks for Play/Pause.</p>
+      </div>
+
+      <!-- HUD Style Selector -->
+      <div class="setting-item">
+        <label for="style-select">Visualizer HUD Style</label>
+        <div class="select-wrap">
+          <select id="style-select">
+            <option value="wave">Waveform Equalizer + Slider</option>
+            <option value="minimal">Minimal Pill Slider</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>Drag horizontally across YouTube viewport</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
