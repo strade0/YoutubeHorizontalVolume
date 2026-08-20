@@ -4,19 +4,14 @@ Adjust YouTube video volume by dragging horizontally across the viewport.
 
 ---
 
-## Features
+## ✨ Features
 
 - **Horizontal Drag Control**: Drag horizontally across the video to adjust volume (uses ~60% of player width for full 0% to 100% range).
 - **Visualizer HUD**: A floating volume bar and waveform displayed directly above your mouse cursor.
-- **Fast-Forward Support**: Pressing and holding to fast-forward (2x speed) works normally without triggering volume adjustment.
-- **Tab-Isolated Audio**: Changing volume in one tab does not change volume in other open tabs.
-- **Volume Persistence**: Volume levels stay saved across page reloads and video navigations.
-- **Native Slider Sync**: Fully compatible with YouTube's native bottom-bar volume slider.
-- **Customizable**: Change sensitivity, drag trigger (Left-Click, Right-Click, Shift+Left, Alt+Left), and HUD style in the extension popup.
 
 ---
 
-## Installation
+## 🚀 Installation
 
 1. Click the green **Code** button at the top of this repository and select **Download ZIP**.
 2. Extract the downloaded ZIP file to a folder on your computer.
@@ -27,6 +22,6 @@ Adjust YouTube video volume by dragging horizontally across the viewport.
 
 ---
 
-## License
+## 📄 License
 
 MIT License.
