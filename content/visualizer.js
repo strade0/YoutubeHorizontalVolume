@@ -35,34 +35,34 @@ class VolumeVisualizerHUD {
       case 'muted':
         return `
           <svg viewBox="0 0 24 24">
-            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
-            <line x1="23" y1="9" x2="17" y2="15"/>
-            <line x1="17" y1="9" x2="23" y2="15"/>
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <line x1="22" y1="9" x2="16" y2="15"/>
+            <line x1="16" y1="9" x2="22" y2="15"/>
           </svg>
         `;
       case 'low':
         return `
           <svg viewBox="0 0 24 24">
-            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15 9a5 5 0 0 1 0 6"/>
           </svg>
         `;
       case 'mid':
         return `
           <svg viewBox="0 0 24 24">
-            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15 9a5 5 0 0 1 0 6"/>
+            <path d="M18 7a8.5 8.5 0 0 1 0 10"/>
           </svg>
         `;
       case 'high':
       default:
         return `
           <svg viewBox="0 0 24 24">
-            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
-            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-            <path d="M22.5 1.5a15 15 0 0 1 0 21"/>
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M15 9a5 5 0 0 1 0 6"/>
+            <path d="M18 7a8.5 8.5 0 0 1 0 10"/>
+            <path d="M21 5a12 12 0 0 1 0 14"/>
           </svg>
         `;
     }
@@ -271,6 +271,7 @@ class VolumeVisualizerHUD {
       return;
     }
     this.hideTimeout = setTimeout(() => {
+      this.hideTimeout = null;
       if (this.wrapper) {
         this.wrapper.classList.remove('yt-vol-visible');
         this.lastX = -1;

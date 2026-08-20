@@ -7,8 +7,31 @@
 (function () {
   'use strict';
 
+  function isInlinePreview(el) {
+    if (!el) return false;
+    try {
+      if (el.closest) {
+        if (el.closest('ytd-inline-preview-renderer, #inline-preview-player, .inline-preview-player, ytd-thumbnail, ytd-rich-item-renderer #video-preview, [is-inline-preview]')) {
+          return true;
+        }
+      }
+      if (el.id === 'inline-preview-player' || (el.classList && el.classList.contains('inline-preview-player'))) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
   function getPlayer() {
-    return document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+    const moviePlayer = document.getElementById('movie_player');
+    if (moviePlayer && !isInlinePreview(moviePlayer)) {
+      return moviePlayer;
+    }
+    const watchPlayer = document.querySelector('ytd-watch-flexy .html5-video-player, #shorts-player, ytd-miniplayer .html5-video-player');
+    if (watchPlayer && !isInlinePreview(watchPlayer)) {
+      return watchPlayer;
+    }
+    return null;
   }
 
   function setYouTubePlayerVolume(volume, isMuted) {

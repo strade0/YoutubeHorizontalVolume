@@ -1,7 +1,7 @@
 /**
  * YouTube Viewport Volume Drag - Content Script
  * Robust persistent volume memory, zero startup burst, full native slider support,
- * and reliable reload persistence.
+ * keyboard shortcuts synchronization, race-free HUD lifecycle, and reliable reload persistence.
  */
 
 (function () {
@@ -31,6 +31,7 @@
   let fastForwardLocked = false;
   let isUserInteractingWithNativeSlider = false;
   let isInternalVolumeChange = false;
+  let lastUserVolumeInteractionTime = 0;
 
   let mouseDownTime = 0;
   let startX = 0;
@@ -55,6 +56,22 @@
   let suppressNextContextMenu = false;
   const DRAG_THRESHOLD_PX = 6;
   const FAST_FORWARD_THRESHOLD_MS = 400;
+
+  // Helper to identify YouTube thumbnail hover preview players vs main player
+  function isInlinePreview(el) {
+    if (!el) return false;
+    try {
+      if (el.closest) {
+        if (el.closest('ytd-inline-preview-renderer, #inline-preview-player, .inline-preview-player, [is-inline-preview]')) {
+          return true;
+        }
+      }
+      if (el.id === 'inline-preview-player' || (el.classList && el.classList.contains('inline-preview-player'))) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
 
   // 2. Early load of saved volume from extension persistent storage
   try {
@@ -129,9 +146,9 @@
     } catch (e) {}
   }
 
-  // Apply early volume to any newly created video element before playback begins
+  // Apply early volume to any newly created primary video element before playback begins
   function applyEarlyVolumeToVideo(video) {
-    if (!video || tabDesiredVolume === null) return;
+    if (!video || tabDesiredVolume === null || isInlinePreview(video)) return;
     try {
       isInternalVolumeChange = true;
       video.volume = tabDesiredVolume;
@@ -140,15 +157,15 @@
     } catch (e) {}
   }
 
-  // Capture video initialization before first audio frame outputs
+  // Capture video initialization before first audio frame outputs (excluding thumbnail previews)
   document.addEventListener('play', (e) => {
-    if (e.target && e.target.tagName === 'VIDEO') {
+    if (e.target && e.target.tagName === 'VIDEO' && !isInlinePreview(e.target)) {
       applyEarlyVolumeToVideo(e.target);
     }
   }, true);
 
   document.addEventListener('loadedmetadata', (e) => {
-    if (e.target && e.target.tagName === 'VIDEO') {
+    if (e.target && e.target.tagName === 'VIDEO' && !isInlinePreview(e.target)) {
       applyEarlyVolumeToVideo(e.target);
     }
   }, true);
@@ -181,19 +198,49 @@
     });
   }
 
-  // Find player and video elements
+  // Find player and video elements (restricted to primary watch player, shorts, or miniplayer)
   function getPlayerElements() {
-    const player = document.getElementById('movie_player') || 
-                   document.querySelector('.html5-video-player') ||
-                   document.querySelector('ytd-player');
-    const video = player ? player.querySelector('video') : document.querySelector('video');
-    return { player, video };
+    // 1. Check for primary movie_player
+    const moviePlayer = document.getElementById('movie_player');
+    if (moviePlayer && !isInlinePreview(moviePlayer)) {
+      const video = moviePlayer.querySelector('video');
+      if (video) return { player: moviePlayer, video };
+    }
+
+    // 2. Check for watch flexy / shorts / miniplayer
+    const primaryContainer = document.querySelector('ytd-watch-flexy, ytd-watch-grid, #shorts-player, ytd-shorts, ytd-miniplayer');
+    if (primaryContainer) {
+      const player = primaryContainer.querySelector('.html5-video-player') || primaryContainer;
+      const video = primaryContainer.querySelector('video');
+      if (player && video && !isInlinePreview(player) && !isInlinePreview(video)) {
+        return { player, video };
+      }
+    }
+
+    // 3. Fallback: only standard video player if NOT inside inline preview
+    const player = document.querySelector('.html5-video-player:not(#inline-preview-player)');
+    if (player && !isInlinePreview(player)) {
+      const video = player.querySelector('video');
+      if (video && !isInlinePreview(video)) {
+        return { player, video };
+      }
+    }
+
+    return { player: null, video: null };
   }
 
   // Ensure HUD and listeners are attached
   function ensureHUD() {
     const { player, video } = getPlayerElements();
-    if (!player || !video) return false;
+    if (!player || !video) {
+      if (activeVideo) {
+        activeVideo.removeEventListener('ratechange', onRateChange);
+        activeVideo.removeEventListener('volumechange', onVideoVolumeChange);
+        activeVideo = null;
+      }
+      activePlayer = null;
+      return false;
+    }
 
     if (activeVideo !== video) {
       if (activeVideo) {
@@ -232,13 +279,18 @@
   function onVideoVolumeChange() {
     if (isInternalVolumeChange || isDragging || !activeVideo) return;
 
-    if (isUserInteractingWithNativeSlider) {
-      // User is manually adjusting native slider -> Save the new volume!
+    const isUserInteraction = isUserInteractingWithNativeSlider ||
+                             ((performance.now() - lastUserVolumeInteractionTime) < 1500);
+
+    if (isUserInteraction) {
+      // User is manually adjusting volume (via slider, arrow keys, or keyboard shortcuts) -> Save new volume!
       persistVolume(activeVideo.volume, activeVideo.muted);
+      syncNativeSliderUI(activeVideo.volume, activeVideo.muted);
+      syncWithMainWorldPlayer(Math.round(activeVideo.volume * 100), activeVideo.muted);
     } else if (tabDesiredVolume !== null) {
-      // YouTube attempted an automatic background reset (e.g. ad end, live chunk buffer) -> Re-enforce user volume!
+      // YouTube attempted an automatic background reset (e.g. ad transition) -> Re-enforce user volume!
       const diff = Math.abs(activeVideo.volume - tabDesiredVolume);
-      if (diff > 0.02) {
+      if (diff > 0.02 || activeVideo.muted !== tabDesiredMuted) {
         isInternalVolumeChange = true;
         activeVideo.volume = tabDesiredVolume;
         activeVideo.muted = tabDesiredMuted;
@@ -410,11 +462,11 @@
 
       const clamped = Math.max(0, Math.min(1, pendingVolume));
 
-      // Scratch-free direct audio assignment + visual update
+      // Direct audio assignment + visual update
       applyHardwareVolume(clamped, clamped === 0);
 
-      // Update floating HUD with cached player rect
-      if (hud && cachedPlayerRect) {
+      // Update floating HUD ONLY if still actively dragging!
+      if (hud && cachedPlayerRect && isDragging) {
         hud.update(clamped, clamped === 0, pendingCursorX, pendingCursorY, cachedPlayerRect);
       }
     });
@@ -447,27 +499,62 @@
     releaseNativeSlider();
   }
 
-  // Global listeners to track native slider interaction
+  // Global listeners to track native slider and keyboard interactions
   function onGlobalPointerDown(e) {
     if (e.target && e.target.closest && e.target.closest('.ytp-volume-control, .ytp-volume-panel, .ytp-volume-slider, .ytp-mute-button')) {
       isUserInteractingWithNativeSlider = true;
+      lastUserVolumeInteractionTime = performance.now();
     }
   }
 
   function onGlobalPointerUp() {
     setTimeout(() => {
       isUserInteractingWithNativeSlider = false;
-    }, 150);
+    }, 300);
+  }
+
+  function isTypingInInput(target) {
+    if (!target) return false;
+    return (
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.isContentEditable ||
+      (target.getAttribute && target.getAttribute('role') === 'textbox')
+    );
+  }
+
+  function onKeyDown(e) {
+    if (isTypingInInput(e.target)) return;
+
+    if (
+      e.key === 'ArrowUp' ||
+      e.key === 'ArrowDown' ||
+      e.key === 'm' ||
+      e.key === 'M' ||
+      e.key === 'AudioVolumeUp' ||
+      e.key === 'AudioVolumeDown' ||
+      e.key === 'AudioVolumeMute'
+    ) {
+      lastUserVolumeInteractionTime = performance.now();
+    }
+  }
+
+  function onWheel(e) {
+    if (activePlayer && activePlayer.contains(e.target)) {
+      lastUserVolumeInteractionTime = performance.now();
+    }
   }
 
   // Mouse Down Handler
   function onMouseDown(e) {
     if (e.target && e.target.closest && e.target.closest('.ytp-volume-control, .ytp-volume-panel, .ytp-volume-slider, .ytp-mute-button')) {
       isUserInteractingWithNativeSlider = true;
+      lastUserVolumeInteractionTime = performance.now();
       return;
     }
 
     if (!config.enabled) return;
+    if (isInlinePreview(e.target)) return;
 
     const { player, video } = getPlayerElements();
     if (!player || !video) return;
@@ -547,14 +634,15 @@
 
   // Mouse Up Handler
   function onMouseUp(e) {
-    if (!isPointerDown) return;
+    if (!isPointerDown && !isDragging) return;
 
+    const wasDragging = isDragging;
     isPointerDown = false;
+    isDragging = false;
 
-    if (isDragging) {
-      isDragging = false;
+    if (wasDragging) {
       suppressNextClick = true;
-      if (config.dragTrigger === 'right' || e.button === 2) {
+      if (config.dragTrigger === 'right' || (e && e.button === 2)) {
         suppressNextContextMenu = true;
       }
 
@@ -576,6 +664,10 @@
 
       if (hud) {
         hud.hide(650);
+      }
+    } else {
+      if (hud) {
+        hud.hide(0);
       }
     }
 
@@ -612,6 +704,8 @@
     window.addEventListener('mouseup', onMouseUp, true);
     window.addEventListener('click', onClickCapture, true);
     window.addEventListener('contextmenu', onContextMenuCapture, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('wheel', onWheel, { passive: true, capture: true });
 
     // Native slider interaction tracking listeners
     window.addEventListener('pointerdown', onGlobalPointerDown, true);
@@ -642,10 +736,10 @@
       }
     }, { passive: true });
 
-    // Early MutationObserver to catch video initialization
+    // Early MutationObserver to catch video initialization (excluding inline thumbnail previews)
     const observer = new MutationObserver(() => {
-      const video = document.querySelector('video');
-      if (video && !video.__ytVolEarlyInit) {
+      const { video } = getPlayerElements();
+      if (video && !video.__ytVolEarlyInit && !isInlinePreview(video)) {
         video.__ytVolEarlyInit = true;
         applyEarlyVolumeToVideo(video);
       }
