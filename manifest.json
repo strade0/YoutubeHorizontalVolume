@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Toolkit",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Volume drag, layout trimmer, and auto Jump Ahead — three YouTube tools in one extension, each with its own toggle.",
   "permissions": [
     "storage",
@@ -13,18 +13,10 @@
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "YouTube Toolkit",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "32": "icons/icon32.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
+    "default_icon": "icon.png"
   },
   "icons": {
-    "16": "icons/icon16.png",
-    "32": "icons/icon32.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "128": "icon.png"
   },
   "content_scripts": [
     {

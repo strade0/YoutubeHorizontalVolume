@@ -61,6 +61,10 @@
   let pendingVolume = 1.0;
   let pendingCursorX = 0;
   let pendingCursorY = 0;
+  let lastSyncedIntVol = null;
+  let lastSyncedMuted = null;
+  let lastNativeSliderKey = '';
+  let playerObserver = null;
 
   let suppressNextClick = false;
   let suppressNextContextMenu = false;
@@ -155,6 +159,9 @@
 
   function syncWithMainWorldPlayer(intVol, isMuted) {
     if (!Number.isFinite(intVol)) return;
+    if (lastSyncedIntVol === intVol && lastSyncedMuted === isMuted) return;
+    lastSyncedIntVol = intVol;
+    lastSyncedMuted = isMuted;
     try {
       window.dispatchEvent(new CustomEvent('yt-vol-sync-player', {
         detail: {
@@ -471,12 +478,15 @@
       tabDesiredVolume = clamped;
       tabDesiredMuted = isMuted;
 
-      if (isDragging) {
-        cachedPlayerRect = activePlayer.getBoundingClientRect();
-      }
-
+      // Keep the HUD on the compositor: do not re-measure layout every frame.
+      // Player size is stable during a drag (cached on pointerdown / resize).
       syncWithMainWorldPlayer(intVol, isMuted);
-      syncNativeSliderUI(clamped, isMuted);
+
+      const sliderKey = `${intVol}:${isMuted ? 1 : 0}`;
+      if (sliderKey !== lastNativeSliderKey) {
+        lastNativeSliderKey = sliderKey;
+        syncNativeSliderUI(clamped, isMuted);
+      }
 
       if (hud && cachedPlayerRect && isDragging) {
         hud.update(clamped, isMuted, pendingCursorX, pendingCursorY, cachedPlayerRect);
@@ -484,9 +494,34 @@
     });
   }
 
+  function pausePlayerObserver() {
+    if (playerObserver) {
+      playerObserver.disconnect();
+    }
+  }
+
+  function resumePlayerObserver() {
+    startPlayerObserver();
+  }
+
+  function startPlayerObserver() {
+    if (playerObserver) {
+      playerObserver.disconnect();
+    }
+    const target = document.getElementById('movie_player')
+      || document.querySelector('ytd-player')
+      || document.querySelector('ytd-watch-flexy')
+      || document.documentElement;
+    playerObserver = new MutationObserver(() => {
+      scheduleEnsureHUD();
+    });
+    playerObserver.observe(target, { childList: true, subtree: true });
+  }
+
   function beginVolumeDrag() {
     isDragging = true;
     setDraggingClass(true);
+    pausePlayerObserver();
     cancelYouTubeSpeedmaster();
 
     if (captureEl && activePointerId !== null && captureEl.setPointerCapture) {
@@ -552,6 +587,7 @@
       cancelYouTubeSpeedmaster();
       releaseNativeSlider();
       setDraggingClass(false);
+      resumePlayerObserver();
 
       if (hud) {
         hud.hide(650);
@@ -741,6 +777,7 @@
   }
 
   function clampNativeSliderHandle() {
+    if (isDragging) return;
     if (!activePlayer) return;
     const handle = activePlayer.querySelector('.ytp-volume-slider-handle');
     if (handle && handle.style && handle.style.left) {
@@ -786,14 +823,7 @@
       }
     }, { passive: true });
 
-    const observer = new MutationObserver(() => {
-      scheduleEnsureHUD();
-    });
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
-
+    startPlayerObserver();
     ensureHUD();
   }
 

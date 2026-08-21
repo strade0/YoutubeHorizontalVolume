@@ -21,6 +21,9 @@ class VolumeVisualizerHUD {
     this.lastMuted = null;
     this.lastX = -1;
     this.lastY = -1;
+    this.lastBelow = null;
+    this.cardWidth = 0;
+    this.cardHeight = 0;
   }
 
   getSpeakerState(level, isMuted) {
@@ -152,6 +155,8 @@ class VolumeVisualizerHUD {
 
   setStyle(style) {
     this.currentStyle = style;
+    this.cardWidth = 0;
+    this.cardHeight = 0;
     if (this.wrapper) {
       if (style === 'minimal') {
         this.wrapper.classList.add('yt-vol-style-minimal');
@@ -161,6 +166,14 @@ class VolumeVisualizerHUD {
     }
   }
 
+  measure() {
+    if (!this.wrapper) return;
+    const w = this.wrapper.offsetWidth;
+    const h = this.wrapper.offsetHeight;
+    if (w) this.cardWidth = w;
+    if (h) this.cardHeight = h;
+  }
+
   show() {
     if (this.hideTimeout) {
       clearTimeout(this.hideTimeout);
@@ -168,7 +181,15 @@ class VolumeVisualizerHUD {
     }
     if (this.wrapper && !this.wrapper.classList.contains('yt-vol-visible')) {
       this.wrapper.classList.add('yt-vol-visible');
+      this.measure();
     }
+  }
+
+  applyTransform(x, y, below) {
+    if (!this.wrapper) return;
+    const scale = 1;
+    const anchor = below ? 'translate(-50%, 8px)' : 'translate(-50%, -100%)';
+    this.wrapper.style.transform = `translate3d(${x}px, ${y}px, 0) ${anchor} scale(${scale})`;
   }
 
   setPosition(cursorX, cursorY, playerRect) {
@@ -179,8 +200,8 @@ class VolumeVisualizerHUD {
     const relX = cursorX - playerRect.left;
     const relY = cursorY - playerRect.top;
 
-    const cardWidth = this.wrapper.offsetWidth || (this.currentStyle === 'minimal' ? 240 : 320);
-    const cardHeight = this.wrapper.offsetHeight || 55;
+    const cardWidth = this.cardWidth || (this.currentStyle === 'minimal' ? 240 : 320);
+    const cardHeight = this.cardHeight || 55;
     const halfWidth = cardWidth / 2;
     const gap = 16;
 
@@ -190,7 +211,6 @@ class VolumeVisualizerHUD {
 
     const spaceAbove = relY - gap;
     const flipBelow = spaceAbove < cardHeight + 10;
-    this.wrapper.classList.toggle('yt-vol-hud-below', flipBelow);
 
     let clampedY;
     if (flipBelow) {
@@ -200,11 +220,12 @@ class VolumeVisualizerHUD {
       clampedY = Math.round(Math.max(cardHeight + 10, Math.min(playerRect.height - 10, relY - gap)));
     }
 
-    if (clampedX !== this.lastX || clampedY !== this.lastY) {
+    if (clampedX !== this.lastX || clampedY !== this.lastY || flipBelow !== this.lastBelow) {
       this.lastX = clampedX;
       this.lastY = clampedY;
-      this.wrapper.style.left = `${clampedX}px`;
-      this.wrapper.style.top = `${clampedY}px`;
+      this.lastBelow = flipBelow;
+      this.wrapper.classList.toggle('yt-vol-hud-below', flipBelow);
+      this.applyTransform(clampedX, clampedY, flipBelow);
     }
   }
 
@@ -219,6 +240,10 @@ class VolumeVisualizerHUD {
     const percent = Math.round(clampedVol * 100);
     const effectiveMuted = isMuted || percent === 0;
 
+    if (percent === this.lastPercent && effectiveMuted === this.lastMuted) {
+      return;
+    }
+
     // 1. Update Slider Fill
     if (this.fill) {
       this.fill.style.width = `${effectiveMuted ? 0 : percent}%`;
@@ -231,8 +256,8 @@ class VolumeVisualizerHUD {
       this.iconBox.innerHTML = this.getSpeakerSvg(speakerState);
     }
 
-    // 3. Update Badge Text (only when percent or muted state changes)
-    if (this.badge && (percent !== this.lastPercent || effectiveMuted !== this.lastMuted)) {
+    // 3. Update Badge Text
+    if (this.badge) {
       this.lastPercent = percent;
       this.lastMuted = effectiveMuted;
       if (effectiveMuted) {
@@ -242,6 +267,9 @@ class VolumeVisualizerHUD {
         this.badge.textContent = `${percent}%`;
         this.badge.classList.remove('is-muted');
       }
+    } else {
+      this.lastPercent = percent;
+      this.lastMuted = effectiveMuted;
     }
 
     // 4. Update Waveform Equalizer Bars
@@ -271,8 +299,10 @@ class VolumeVisualizerHUD {
     const hideNow = () => {
       if (this.wrapper) {
         this.wrapper.classList.remove('yt-vol-visible', 'yt-vol-hud-below');
+        this.wrapper.style.transform = '';
         this.lastX = -1;
         this.lastY = -1;
+        this.lastBelow = null;
       }
     };
 
