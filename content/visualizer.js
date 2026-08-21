@@ -179,19 +179,25 @@ class VolumeVisualizerHUD {
     const relX = cursorX - playerRect.left;
     const relY = cursorY - playerRect.top;
 
-    const cardWidth = this.currentStyle === 'minimal' ? 240 : 320;
-    const cardHeight = 55;
+    const cardWidth = this.wrapper.offsetWidth || (this.currentStyle === 'minimal' ? 240 : 320);
+    const cardHeight = this.wrapper.offsetHeight || 55;
     const halfWidth = cardWidth / 2;
+    const gap = 16;
 
     const minX = halfWidth + 12;
     const maxX = Math.max(minX, playerRect.width - halfWidth - 12);
     const clampedX = Math.round(Math.max(minX, Math.min(maxX, relX)));
 
+    const spaceAbove = relY - gap;
+    const flipBelow = spaceAbove < cardHeight + 10;
+    this.wrapper.classList.toggle('yt-vol-hud-below', flipBelow);
+
     let clampedY;
-    if (relY - 20 - cardHeight < 10) {
-      clampedY = Math.round(Math.min(playerRect.height - 10, relY + cardHeight + 25));
+    if (flipBelow) {
+      const maxY = Math.max(gap, playerRect.height - cardHeight - 10);
+      clampedY = Math.round(Math.max(gap, Math.min(maxY, relY + gap)));
     } else {
-      clampedY = Math.round(Math.max(cardHeight + 10, Math.min(playerRect.height - 10, relY - 20)));
+      clampedY = Math.round(Math.max(cardHeight + 10, Math.min(playerRect.height - 10, relY - gap)));
     }
 
     if (clampedX !== this.lastX || clampedY !== this.lastY) {
@@ -262,21 +268,21 @@ class VolumeVisualizerHUD {
       clearTimeout(this.hideTimeout);
       this.hideTimeout = null;
     }
-    if (delay === 0) {
+    const hideNow = () => {
       if (this.wrapper) {
-        this.wrapper.classList.remove('yt-vol-visible');
+        this.wrapper.classList.remove('yt-vol-visible', 'yt-vol-hud-below');
         this.lastX = -1;
         this.lastY = -1;
       }
+    };
+
+    if (delay === 0) {
+      hideNow();
       return;
     }
     this.hideTimeout = setTimeout(() => {
       this.hideTimeout = null;
-      if (this.wrapper) {
-        this.wrapper.classList.remove('yt-vol-visible');
-        this.lastX = -1;
-        this.lastY = -1;
-      }
+      hideNow();
     }, delay);
   }
 

@@ -35,6 +35,15 @@
   transform: translate(-50%, -100%) scale(1);
 }
 
+/* Flip the HUD below the cursor near the top edge of the player */
+.yt-vol-hud-wrapper.yt-vol-hud-below {
+  transform: translate(-50%, 8px) scale(0.92);
+}
+
+.yt-vol-hud-wrapper.yt-vol-visible.yt-vol-hud-below {
+  transform: translate(-50%, 8px) scale(1);
+}
+
 /* Glassmorphism Card Pill */
 .yt-vol-hud-card {
   display: flex;
@@ -167,9 +176,11 @@
   display: none;
 }
 
-.yt-vol-style-minimal .yt-vol-card {
+.yt-vol-style-minimal .yt-vol-hud-card {
   min-width: 220px;
+  max-width: 280px;
   padding: 10px 18px;
+  gap: 12px;
 }
 
 .yt-vol-style-minimal .yt-vol-body {
@@ -179,6 +190,10 @@
 /* Dragging active helper indicator */
 .yt-vol-dragging-active {
   cursor: ew-resize !important;
+}
+
+.html5-video-player.yt-vol-dragging-active {
+  touch-action: none;
 }
 
 .yt-vol-dragging-active * {

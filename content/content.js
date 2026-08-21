@@ -1,20 +1,27 @@
 /**
  * YouTube Viewport Volume Drag - Content Script
  * Robust persistent volume memory, zero startup burst, full native slider support,
- * keyboard shortcuts synchronization, race-free HUD lifecycle, and reliable reload persistence.
+ * keyboard shortcuts synchronization, race-free HUD lifecycle, and normalization-proof master volume.
  */
 
 (function () {
   'use strict';
 
-  // 1. Block cross-tab storage broadcast so other open tabs stay independent
+  const VOLUME_STORAGE_KEYS = new Set([
+    'yt_extension_saved_volume',
+    'yt_extension_saved_muted',
+    'yt_tab_volume',
+    'yt_tab_muted',
+    'yt-player-volume'
+  ]);
+
+  // Block cross-tab storage broadcast so other open tabs stay independent
   window.addEventListener('storage', (e) => {
-    if (e.key && (e.key.includes('volume') || e.key.includes('muted') || e.key === 'yt-player-volume')) {
+    if (e.key && VOLUME_STORAGE_KEYS.has(e.key)) {
       e.stopImmediatePropagation();
     }
   }, true);
 
-  // Configuration defaults
   const config = {
     enabled: true,
     dragTrigger: 'left', // 'left', 'right', 'shift-left', 'alt-left'
@@ -22,18 +29,16 @@
     hudStyle: 'wave'     // 'wave' or 'minimal'
   };
 
-  // State
   let hud = null;
   let activePlayer = null;
   let activeVideo = null;
   let isPointerDown = false;
   let isDragging = false;
   let fastForwardLocked = false;
-  let isUserInteractingWithNativeSlider = false;
-  let isInternalVolumeChange = false;
-  let lastUserVolumeInteractionTime = 0;
+  let activePointerId = null;
+  let captureEl = null;
 
-  let mouseDownTime = 0;
+  let pointerDownTime = 0;
   let startX = 0;
   let startY = 0;
   let initialVolume = 1.0;
@@ -41,23 +46,24 @@
   let cachedPlayerRect = null;
   let cachedSpanWidth = 600;
 
-  // Persistent desired volume state
   let tabDesiredVolume = null;
   let tabDesiredMuted = false;
 
-  // Animation frame state
   let rAFScheduled = false;
   let pendingVolume = 1.0;
   let pendingCursorX = 0;
   let pendingCursorY = 0;
 
-  // Click & Context Menu suppression
   let suppressNextClick = false;
   let suppressNextContextMenu = false;
+  let suppressClickTimer = null;
+  let suppressContextTimer = null;
+  let hudEnsureTimer = null;
+
   const DRAG_THRESHOLD_PX = 6;
   const FAST_FORWARD_THRESHOLD_MS = 400;
+  const DEFAULT_SLIDER_HANDLE_MAX = 40;
 
-  // Helper to identify YouTube thumbnail hover preview players vs main player
   function isInlinePreview(el) {
     if (!el) return false;
     try {
@@ -73,24 +79,29 @@
     return false;
   }
 
-  // 2. Early load of saved volume from extension persistent storage
+  function toFiniteVolume(value, fallback = null) {
+    const n = typeof value === 'number' ? value : parseFloat(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(1, n));
+  }
+
   try {
     const extSaved = localStorage.getItem('yt_extension_saved_volume');
     if (extSaved !== null) {
-      tabDesiredVolume = parseFloat(extSaved);
+      tabDesiredVolume = toFiniteVolume(extSaved, null);
       tabDesiredMuted = localStorage.getItem('yt_extension_saved_muted') === 'true';
     } else {
       const savedTabVol = sessionStorage.getItem('yt_tab_volume');
       if (savedTabVol !== null) {
-        tabDesiredVolume = parseFloat(savedTabVol);
+        tabDesiredVolume = toFiniteVolume(savedTabVol, null);
         tabDesiredMuted = sessionStorage.getItem('yt_tab_muted') === 'true';
       } else {
         const ytStorage = localStorage.getItem('yt-player-volume');
         if (ytStorage) {
           const parsed = JSON.parse(ytStorage);
           const innerData = typeof parsed.data === 'string' ? JSON.parse(parsed.data) : parsed.data;
-          if (innerData && typeof innerData.volume === 'number') {
-            tabDesiredVolume = innerData.volume / 100;
+          if (innerData && typeof innerData.volume === 'number' && Number.isFinite(innerData.volume)) {
+            tabDesiredVolume = toFiniteVolume(innerData.volume / 100, null);
             tabDesiredMuted = !!innerData.muted;
           }
         }
@@ -98,11 +109,12 @@
     }
   } catch (e) {}
 
-  // Persist volume to YouTube's exact localStorage schema & extension storage
   function persistVolume(volumeFraction, isMuted) {
-    const clamped = Math.max(0, Math.min(1, volumeFraction));
+    const clamped = toFiniteVolume(volumeFraction, null);
+    if (clamped === null) return;
+
     const intVol = Math.round(clamped * 100);
-    const muted = isMuted || intVol === 0;
+    const muted = !!(isMuted || intVol === 0);
     const now = Date.now();
     const oneYear = 365 * 24 * 60 * 60 * 1000;
 
@@ -129,13 +141,12 @@
     } catch (e) {}
   }
 
-  // Sync early storage at document_start
   if (tabDesiredVolume !== null) {
     persistVolume(tabDesiredVolume, tabDesiredMuted);
   }
 
-  // Dispatch sync event to main_bridge.js (running in world: "MAIN", 100% CSP compliant)
   function syncWithMainWorldPlayer(intVol, isMuted) {
+    if (!Number.isFinite(intVol)) return;
     try {
       window.dispatchEvent(new CustomEvent('yt-vol-sync-player', {
         detail: {
@@ -146,31 +157,18 @@
     } catch (e) {}
   }
 
-  // Apply early volume to any newly created primary video element before playback begins
-  function applyEarlyVolumeToVideo(video) {
-    if (!video || tabDesiredVolume === null || isInlinePreview(video)) return;
-    try {
-      isInternalVolumeChange = true;
-      video.volume = tabDesiredVolume;
-      video.muted = tabDesiredMuted;
-      isInternalVolumeChange = false;
-    } catch (e) {}
-  }
+  window.addEventListener('yt-player-volume-changed', (e) => {
+    if (!e || !e.detail || isDragging) return;
 
-  // Capture video initialization before first audio frame outputs (excluding thumbnail previews)
-  document.addEventListener('play', (e) => {
-    if (e.target && e.target.tagName === 'VIDEO' && !isInlinePreview(e.target)) {
-      applyEarlyVolumeToVideo(e.target);
+    const { volume, isMuted } = e.detail;
+    if (typeof volume === 'number' && Number.isFinite(volume)) {
+      const volFraction = toFiniteVolume(volume / 100, null);
+      if (volFraction === null) return;
+      persistVolume(volFraction, !!isMuted);
+      syncNativeSliderUI(volFraction, tabDesiredMuted);
     }
-  }, true);
+  });
 
-  document.addEventListener('loadedmetadata', (e) => {
-    if (e.target && e.target.tagName === 'VIDEO' && !isInlinePreview(e.target)) {
-      applyEarlyVolumeToVideo(e.target);
-    }
-  }, true);
-
-  // Load configuration from chrome storage
   function loadConfig() {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
       chrome.storage.sync.get(config, (items) => {
@@ -184,12 +182,13 @@
     }
   }
 
-  // Listen for configuration changes
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'sync') {
         for (const [key, change] of Object.entries(changes)) {
-          config[key] = change.newValue;
+          if (change.newValue !== undefined) {
+            config[key] = change.newValue;
+          }
         }
         if (hud) {
           hud.setStyle(config.hudStyle);
@@ -198,16 +197,13 @@
     });
   }
 
-  // Find player and video elements (restricted to primary watch player, shorts, or miniplayer)
   function getPlayerElements() {
-    // 1. Check for primary movie_player
     const moviePlayer = document.getElementById('movie_player');
     if (moviePlayer && !isInlinePreview(moviePlayer)) {
       const video = moviePlayer.querySelector('video');
       if (video) return { player: moviePlayer, video };
     }
 
-    // 2. Check for watch flexy / shorts / miniplayer
     const primaryContainer = document.querySelector('ytd-watch-flexy, ytd-watch-grid, #shorts-player, ytd-shorts, ytd-miniplayer');
     if (primaryContainer) {
       const player = primaryContainer.querySelector('.html5-video-player') || primaryContainer;
@@ -217,7 +213,6 @@
       }
     }
 
-    // 3. Fallback: only standard video player if NOT inside inline preview
     const player = document.querySelector('.html5-video-player:not(#inline-preview-player)');
     if (player && !isInlinePreview(player)) {
       const video = player.querySelector('video');
@@ -229,13 +224,27 @@
     return { player: null, video: null };
   }
 
-  // Ensure HUD and listeners are attached
+  function releasePointerCapture() {
+    if (captureEl && activePointerId !== null) {
+      try {
+        if (!captureEl.hasPointerCapture || captureEl.hasPointerCapture(activePointerId)) {
+          captureEl.releasePointerCapture(activePointerId);
+        }
+      } catch (e) {}
+    }
+    captureEl = null;
+  }
+
+  function setDraggingClass(on) {
+    document.body.classList.toggle('yt-vol-dragging-active', on);
+    if (activePlayer) activePlayer.classList.toggle('yt-vol-dragging-active', on);
+  }
+
   function ensureHUD() {
     const { player, video } = getPlayerElements();
     if (!player || !video) {
       if (activeVideo) {
         activeVideo.removeEventListener('ratechange', onRateChange);
-        activeVideo.removeEventListener('volumechange', onVideoVolumeChange);
         activeVideo = null;
       }
       activePlayer = null;
@@ -245,18 +254,14 @@
     if (activeVideo !== video) {
       if (activeVideo) {
         activeVideo.removeEventListener('ratechange', onRateChange);
-        activeVideo.removeEventListener('volumechange', onVideoVolumeChange);
       }
       activeVideo = video;
       activeVideo.addEventListener('ratechange', onRateChange, { passive: true });
-      activeVideo.addEventListener('volumechange', onVideoVolumeChange, { passive: true });
 
-      // Apply initial volume immediately
       if (tabDesiredVolume !== null) {
-        applyHardwareVolume(tabDesiredVolume, tabDesiredMuted);
-      } else {
-        tabDesiredVolume = activeVideo.muted ? 0 : activeVideo.volume;
-        tabDesiredMuted = activeVideo.muted;
+        const intVol = Math.round(tabDesiredVolume * 100);
+        syncWithMainWorldPlayer(intVol, tabDesiredMuted);
+        syncNativeSliderUI(tabDesiredVolume, tabDesiredMuted);
       }
     }
 
@@ -275,34 +280,16 @@
     return true;
   }
 
-  // Handle native volume changes
-  function onVideoVolumeChange() {
-    if (isInternalVolumeChange || isDragging || !activeVideo) return;
-
-    const isUserInteraction = isUserInteractingWithNativeSlider ||
-                             ((performance.now() - lastUserVolumeInteractionTime) < 1500);
-
-    if (isUserInteraction) {
-      // User is manually adjusting volume (via slider, arrow keys, or keyboard shortcuts) -> Save new volume!
-      persistVolume(activeVideo.volume, activeVideo.muted);
-      syncNativeSliderUI(activeVideo.volume, activeVideo.muted);
-      syncWithMainWorldPlayer(Math.round(activeVideo.volume * 100), activeVideo.muted);
-    } else if (tabDesiredVolume !== null) {
-      // YouTube attempted an automatic background reset (e.g. ad transition) -> Re-enforce user volume!
-      const diff = Math.abs(activeVideo.volume - tabDesiredVolume);
-      if (diff > 0.02 || activeVideo.muted !== tabDesiredMuted) {
-        isInternalVolumeChange = true;
-        activeVideo.volume = tabDesiredVolume;
-        activeVideo.muted = tabDesiredMuted;
-        syncNativeSliderUI(tabDesiredVolume, tabDesiredMuted);
-        isInternalVolumeChange = false;
-      }
-    }
+  function scheduleEnsureHUD() {
+    if (hudEnsureTimer != null) return;
+    hudEnsureTimer = setTimeout(() => {
+      hudEnsureTimer = null;
+      ensureHUD();
+    }, 150);
   }
 
-  // Abort YouTube's 2x speedmaster hold when volume drag begins
   function cancelYouTubeSpeedmaster() {
-    if (activeVideo && savedPlaybackRate) {
+    if (activeVideo && Number.isFinite(savedPlaybackRate)) {
       if (activeVideo.playbackRate !== savedPlaybackRate) {
         activeVideo.playbackRate = savedPlaybackRate;
       }
@@ -325,9 +312,8 @@
     }
   }
 
-  // Prevent playback rate change during active volume dragging
   function onRateChange() {
-    if (isDragging && activeVideo && savedPlaybackRate) {
+    if (isDragging && activeVideo && Number.isFinite(savedPlaybackRate)) {
       if (activeVideo.playbackRate !== savedPlaybackRate) {
         activeVideo.playbackRate = savedPlaybackRate;
         cancelYouTubeSpeedmaster();
@@ -335,7 +321,6 @@
     }
   }
 
-  // Check if clicked element is an interactive control
   function isInteractiveElement(target) {
     if (!target) return false;
 
@@ -373,7 +358,6 @@
     return false;
   }
 
-  // Match event against configured trigger
   function matchesTrigger(e) {
     switch (config.dragTrigger) {
       case 'left':
@@ -381,55 +365,46 @@
       case 'right':
         return e.button === 2;
       case 'shift-left':
-        return e.button === 0 && e.shiftKey;
+        return e.button === 0 && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
       case 'alt-left':
-        return e.button === 0 && e.altKey;
+        return e.button === 0 && e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey;
       default:
-        return e.button === 0;
+        return e.button === 0 && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
     }
   }
 
-  // Apply volume cleanly to hardware and sync native slider visual state
-  function applyHardwareVolume(volumeFraction, isMuted) {
-    const clamped = Math.max(0, Math.min(1, volumeFraction));
-    const effectiveMuted = isMuted || clamped === 0;
-
-    persistVolume(clamped, effectiveMuted);
-
-    if (activeVideo) {
-      isInternalVolumeChange = true;
-      activeVideo.volume = clamped;
-      activeVideo.muted = effectiveMuted;
-      isInternalVolumeChange = false;
-    }
-
-    syncNativeSliderUI(clamped, effectiveMuted);
+  function getSliderHandleMax() {
+    if (!activePlayer) return DEFAULT_SLIDER_HANDLE_MAX;
+    const slider = activePlayer.querySelector('.ytp-volume-slider');
+    if (!slider) return DEFAULT_SLIDER_HANDLE_MAX;
+    const handle = slider.querySelector('.ytp-volume-slider-handle');
+    const sliderWidth = slider.clientWidth || slider.offsetWidth;
+    if (!sliderWidth) return DEFAULT_SLIDER_HANDLE_MAX;
+    const handleWidth = handle ? (handle.offsetWidth || 0) : 0;
+    const maxLimit = sliderWidth - handleWidth;
+    return maxLimit > 0 ? maxLimit : DEFAULT_SLIDER_HANDLE_MAX;
   }
 
-  // Synchronize native slider UI elements visually without synthetic event spam
   function syncNativeSliderUI(volumeFraction, isMuted) {
     if (!activePlayer) return;
 
-    const percent = Math.round(volumeFraction * 100);
+    const clamped = toFiniteVolume(volumeFraction, 0);
+    const percent = Math.round(clamped * 100);
     const effectiveMuted = isMuted || percent === 0;
 
-    // 1. Update aria attributes on .ytp-volume-panel
     const panel = activePlayer.querySelector('.ytp-volume-panel');
     if (panel) {
       panel.setAttribute('aria-valuenow', effectiveMuted ? '0' : String(percent));
       panel.setAttribute('aria-valuetext', effectiveMuted ? '0% volume' : `${percent}% volume`);
     }
 
-    // 2. Update .ytp-volume-slider-handle position
-    const slider = activePlayer.querySelector('.ytp-volume-slider');
     const handle = activePlayer.querySelector('.ytp-volume-slider-handle');
     if (handle) {
-      const sliderWidth = (slider && slider.clientWidth > 0) ? slider.clientWidth : 40;
-      const handlePos = effectiveMuted ? 0 : (volumeFraction * sliderWidth);
+      const maxLimit = getSliderHandleMax();
+      const handlePos = effectiveMuted ? 0 : Math.max(0, Math.min(maxLimit, clamped * maxLimit));
       handle.style.left = `${handlePos.toFixed(1)}px`;
     }
 
-    // 3. Update mute button state
     const muteBtn = activePlayer.querySelector('.ytp-mute-button');
     if (muteBtn) {
       muteBtn.setAttribute('title', effectiveMuted ? 'Unmute (m)' : 'Mute (m)');
@@ -437,7 +412,6 @@
     }
   }
 
-  // Ensure native slider is completely released and closed
   function releaseNativeSlider() {
     if (!activePlayer) return;
     const panel = activePlayer.querySelector('.ytp-volume-panel');
@@ -451,216 +425,104 @@
     }
   }
 
-  // Apply volume updates in sync with display refresh rate (rAF)
   function scheduleVolumeUpdate() {
     if (rAFScheduled) return;
     rAFScheduled = true;
 
     requestAnimationFrame(() => {
       rAFScheduled = false;
-      if (!activeVideo) return;
+      if (!activePlayer) return;
 
-      const clamped = Math.max(0, Math.min(1, pendingVolume));
+      const clamped = toFiniteVolume(pendingVolume, null);
+      if (clamped === null) return;
 
-      // Direct audio assignment + visual update
-      applyHardwareVolume(clamped, clamped === 0);
+      const intVol = Math.round(clamped * 100);
+      const isMuted = clamped === 0;
 
-      // Update floating HUD ONLY if still actively dragging!
+      tabDesiredVolume = clamped;
+      tabDesiredMuted = isMuted;
+
+      if (isDragging) {
+        cachedPlayerRect = activePlayer.getBoundingClientRect();
+      }
+
+      syncWithMainWorldPlayer(intVol, isMuted);
+      syncNativeSliderUI(clamped, isMuted);
+
       if (hud && cachedPlayerRect && isDragging) {
-        hud.update(clamped, clamped === 0, pendingCursorX, pendingCursorY, cachedPlayerRect);
+        hud.update(clamped, isMuted, pendingCursorX, pendingCursorY, cachedPlayerRect);
       }
     });
   }
 
-  // Handle Tab Inactivity / Switch / Blur
-  function onTabInactive() {
-    if (isDragging) {
-      isDragging = false;
-      isPointerDown = false;
-      document.body.classList.remove('yt-vol-dragging-active');
-      if (activePlayer) activePlayer.classList.remove('yt-vol-dragging-active');
+  function beginVolumeDrag() {
+    isDragging = true;
+    setDraggingClass(true);
+    cancelYouTubeSpeedmaster();
 
-      if (tabDesiredVolume !== null) {
-        const intVol = Math.round(tabDesiredVolume * 100);
-        persistVolume(tabDesiredVolume, tabDesiredMuted);
-        syncWithMainWorldPlayer(intVol, tabDesiredMuted);
-      }
-    }
-
-    isPointerDown = false;
-    fastForwardLocked = false;
-
-    // Immediately hide HUD with zero delay
-    if (hud) {
-      hud.hide(0);
-    }
-
-    // Close and release native slider
-    releaseNativeSlider();
-  }
-
-  // Global listeners to track native slider and keyboard interactions
-  function onGlobalPointerDown(e) {
-    if (e.target && e.target.closest && e.target.closest('.ytp-volume-control, .ytp-volume-panel, .ytp-volume-slider, .ytp-mute-button')) {
-      isUserInteractingWithNativeSlider = true;
-      lastUserVolumeInteractionTime = performance.now();
+    if (captureEl && activePointerId !== null && captureEl.setPointerCapture) {
+      try {
+        captureEl.setPointerCapture(activePointerId);
+      } catch (e) {}
     }
   }
 
-  function onGlobalPointerUp() {
-    setTimeout(() => {
-      isUserInteractingWithNativeSlider = false;
-    }, 300);
+  function armClickSuppression() {
+    suppressNextClick = true;
+    if (suppressClickTimer) clearTimeout(suppressClickTimer);
+    suppressClickTimer = setTimeout(() => {
+      suppressNextClick = false;
+      suppressClickTimer = null;
+    }, 120);
   }
 
-  function isTypingInInput(target) {
-    if (!target) return false;
-    return (
-      target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.isContentEditable ||
-      (target.getAttribute && target.getAttribute('role') === 'textbox')
-    );
+  function armContextMenuSuppression() {
+    suppressNextContextMenu = true;
+    if (suppressContextTimer) clearTimeout(suppressContextTimer);
+    suppressContextTimer = setTimeout(() => {
+      suppressNextContextMenu = false;
+      suppressContextTimer = null;
+    }, 120);
   }
 
-  function onKeyDown(e) {
-    if (isTypingInInput(e.target)) return;
-
-    if (
-      e.key === 'ArrowUp' ||
-      e.key === 'ArrowDown' ||
-      e.key === 'm' ||
-      e.key === 'M' ||
-      e.key === 'AudioVolumeUp' ||
-      e.key === 'AudioVolumeDown' ||
-      e.key === 'AudioVolumeMute'
-    ) {
-      lastUserVolumeInteractionTime = performance.now();
-    }
-  }
-
-  function onWheel(e) {
-    if (activePlayer && activePlayer.contains(e.target)) {
-      lastUserVolumeInteractionTime = performance.now();
-    }
-  }
-
-  // Mouse Down Handler
-  function onMouseDown(e) {
-    if (e.target && e.target.closest && e.target.closest('.ytp-volume-control, .ytp-volume-panel, .ytp-volume-slider, .ytp-mute-button')) {
-      isUserInteractingWithNativeSlider = true;
-      lastUserVolumeInteractionTime = performance.now();
+  function finishGesture(e, { fromLostCapture } = {}) {
+    if (!isPointerDown && !isDragging) {
+      fastForwardLocked = false;
+      activePointerId = null;
       return;
     }
-
-    if (!config.enabled) return;
-    if (isInlinePreview(e.target)) return;
-
-    const { player, video } = getPlayerElements();
-    if (!player || !video) return;
-
-    // Check if clicked inside player
-    if (!player.contains(e.target)) return;
-
-    // Ignore clicks on controls/buttons
-    if (isInteractiveElement(e.target)) return;
-
-    // Check if matches the configured trigger
-    if (!matchesTrigger(e)) return;
-
-    ensureHUD();
-    isPointerDown = true;
-    isDragging = false;
-    fastForwardLocked = false;
-    mouseDownTime = performance.now();
-
-    startX = e.clientX;
-    startY = e.clientY;
-    initialVolume = video.muted ? 0 : video.volume;
-    savedPlaybackRate = video.playbackRate || 1.0;
-
-    // Cache player geometry ONCE on mousedown
-    cachedPlayerRect = player.getBoundingClientRect();
-    const playerWidth = cachedPlayerRect.width > 0 ? cachedPlayerRect.width : window.innerWidth;
-    const sensitivityRatio = Math.max(0.1, config.sensitivity / 100);
-    cachedSpanWidth = playerWidth * sensitivityRatio;
-  }
-
-  // Mouse Move Handler
-  function onMouseMove(e) {
-    if (!isPointerDown || !activePlayer || !activeVideo || fastForwardLocked) return;
-
-    const deltaX = e.clientX - startX;
-    const deltaY = e.clientY - startY;
-    const distance = Math.hypot(deltaX, deltaY);
-    const elapsed = performance.now() - mouseDownTime;
-
-    if (!isDragging) {
-      // 1. Fast-forward lock check (>= 400ms or 2x speed active)
-      if (elapsed > FAST_FORWARD_THRESHOLD_MS || activeVideo.playbackRate > 1.2 || activePlayer.classList.contains('ytp-speedmaster-active')) {
-        fastForwardLocked = true;
-        return;
-      }
-
-      // 2. Initiate volume drag
-      if (distance > DRAG_THRESHOLD_PX) {
-        isDragging = true;
-        document.body.classList.add('yt-vol-dragging-active');
-        if (activePlayer) activePlayer.classList.add('yt-vol-dragging-active');
-        cancelYouTubeSpeedmaster();
-      } else {
-        return;
-      }
-    }
-
-    // Guard against YouTube activating 2x speed during active volume drag
-    if (activeVideo.playbackRate !== savedPlaybackRate) {
-      activeVideo.playbackRate = savedPlaybackRate;
-      cancelYouTubeSpeedmaster();
-    }
-
-    // Compute new volume
-    const volumeDelta = deltaX / cachedSpanWidth;
-    pendingVolume = Math.max(0, Math.min(1, initialVolume + volumeDelta));
-    pendingCursorX = e.clientX;
-    pendingCursorY = e.clientY;
-
-    // Schedule 60fps update
-    scheduleVolumeUpdate();
-
-    // Prevent text selection
-    e.preventDefault();
-  }
-
-  // Mouse Up Handler
-  function onMouseUp(e) {
-    if (!isPointerDown && !isDragging) return;
 
     const wasDragging = isDragging;
     isPointerDown = false;
     isDragging = false;
+    fastForwardLocked = false;
 
     if (wasDragging) {
-      suppressNextClick = true;
+      armClickSuppression();
       if (config.dragTrigger === 'right' || (e && e.button === 2)) {
-        suppressNextContextMenu = true;
+        armContextMenuSuppression();
       }
 
-      // 1. Apply hardware volume
-      applyHardwareVolume(pendingVolume, pendingVolume === 0);
+      if (e && e.cancelable) {
+        e.preventDefault();
+      }
+      if (e) {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
 
-      // 2. Persist volume to YouTube's schema & extension storage
-      persistVolume(pendingVolume, pendingVolume === 0);
-
-      // 3. Dispatch to main_bridge.js (world: MAIN) for server sync
-      const intVol = Math.round(pendingVolume * 100);
-      syncWithMainWorldPlayer(intVol, pendingVolume === 0);
+      const clamped = toFiniteVolume(pendingVolume, tabDesiredVolume);
+      if (clamped !== null) {
+        const intVol = Math.round(clamped * 100);
+        const isMuted = clamped === 0;
+        persistVolume(clamped, isMuted);
+        syncWithMainWorldPlayer(intVol, isMuted);
+        syncNativeSliderUI(clamped, isMuted);
+      }
 
       cancelYouTubeSpeedmaster();
       releaseNativeSlider();
-
-      document.body.classList.remove('yt-vol-dragging-active');
-      if (activePlayer) activePlayer.classList.remove('yt-vol-dragging-active');
+      setDraggingClass(false);
 
       if (hud) {
         hud.hide(650);
@@ -671,57 +533,217 @@
       }
     }
 
-    fastForwardLocked = false;
+    if (!fromLostCapture) {
+      releasePointerCapture();
+    } else {
+      captureEl = null;
+    }
+    activePointerId = null;
   }
 
-  // Click Interception (Capture Phase)
+  function onTabInactive() {
+    if (isDragging || isPointerDown) {
+      finishGesture(null);
+    } else {
+      isPointerDown = false;
+      fastForwardLocked = false;
+      activePointerId = null;
+      if (hud) hud.hide(0);
+      releaseNativeSlider();
+    }
+  }
+
+  function onPointerDown(e) {
+    if (!e.isPrimary) return;
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 2) return;
+
+    if (e.target && e.target.closest && e.target.closest('.ytp-volume-control, .ytp-volume-panel, .ytp-volume-slider, .ytp-mute-button')) {
+      return;
+    }
+
+    if (!config.enabled) return;
+    if (isInlinePreview(e.target)) return;
+
+    const { player, video } = getPlayerElements();
+    if (!player || !video) return;
+    if (!player.contains(e.target)) return;
+    if (isInteractiveElement(e.target)) return;
+    if (!matchesTrigger(e)) return;
+
+    ensureHUD();
+    isPointerDown = true;
+    isDragging = false;
+    fastForwardLocked = false;
+    activePointerId = e.pointerId;
+    captureEl = player;
+    pointerDownTime = performance.now();
+
+    startX = e.clientX;
+    startY = e.clientY;
+
+    if (tabDesiredVolume !== null) {
+      initialVolume = tabDesiredMuted ? 0 : tabDesiredVolume;
+    } else {
+      initialVolume = video.muted ? 0 : toFiniteVolume(video.volume, 1);
+    }
+    pendingVolume = initialVolume;
+
+    const rate = video.playbackRate;
+    savedPlaybackRate = Number.isFinite(rate) && rate > 0 ? rate : 1.0;
+
+    cachedPlayerRect = player.getBoundingClientRect();
+    const playerWidth = cachedPlayerRect.width > 0 ? cachedPlayerRect.width : window.innerWidth;
+    const sensitivityRatio = Math.max(0.1, config.sensitivity / 100);
+    cachedSpanWidth = playerWidth * sensitivityRatio;
+  }
+
+  function onPointerMove(e) {
+    if (!isPointerDown || !activePlayer || fastForwardLocked) return;
+    if (activePointerId !== null && e.pointerId !== activePointerId) return;
+
+    const deltaX = e.clientX - startX;
+    const deltaY = e.clientY - startY;
+    const distance = Math.hypot(deltaX, deltaY);
+    const elapsed = performance.now() - pointerDownTime;
+
+    if (!isDragging) {
+      // Lock only for YouTube's long-press 2x, not for a user-chosen playback speed.
+      const speedmasterActive = activePlayer.classList.contains('ytp-speedmaster-active');
+      const speedmasterJustStarted = activeVideo &&
+        Number.isFinite(savedPlaybackRate) &&
+        activeVideo.playbackRate > savedPlaybackRate + 0.05 &&
+        speedmasterActive;
+
+      if ((elapsed > FAST_FORWARD_THRESHOLD_MS && distance <= DRAG_THRESHOLD_PX) || speedmasterJustStarted) {
+        fastForwardLocked = true;
+        return;
+      }
+
+      if (distance > DRAG_THRESHOLD_PX) {
+        beginVolumeDrag();
+      } else {
+        return;
+      }
+    }
+
+    if (activeVideo && Number.isFinite(savedPlaybackRate) && activeVideo.playbackRate !== savedPlaybackRate) {
+      activeVideo.playbackRate = savedPlaybackRate;
+      cancelYouTubeSpeedmaster();
+    }
+
+    const volumeDelta = deltaX / cachedSpanWidth;
+    const rawVolume = initialVolume + volumeDelta;
+
+    if (rawVolume > 1.0) {
+      initialVolume = 1.0;
+      startX = e.clientX;
+      pendingVolume = 1.0;
+    } else if (rawVolume < 0.0) {
+      initialVolume = 0.0;
+      startX = e.clientX;
+      pendingVolume = 0.0;
+    } else {
+      pendingVolume = rawVolume;
+    }
+
+    pendingCursorX = e.clientX;
+    pendingCursorY = e.clientY;
+
+    scheduleVolumeUpdate();
+
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+    e.stopPropagation();
+  }
+
+  function onPointerUp(e) {
+    if (!isPointerDown && !isDragging) return;
+    if (activePointerId !== null && e.pointerId !== activePointerId) return;
+    // Our speedmaster abort synthesizes pointercancel; only the browser's
+    // trusted cancel (tab switch, OS gesture, etc.) should end the drag.
+    if (e.type === 'pointercancel' && e.isTrusted === false) return;
+    finishGesture(e);
+  }
+
+  function onLostPointerCapture(e) {
+    if (!isPointerDown && !isDragging) return;
+    if (activePointerId !== null && e.pointerId !== activePointerId) return;
+    finishGesture(e, { fromLostCapture: true });
+  }
+
+  // Pointerup does not cancel compatibility mouseup. YouTube play/pause listens
+  // to mouseup/click on the video; vertical drags often release over the play
+  // button or the video surface, which would toggle playback without this.
+  function onCompatMouseUp(e) {
+    if (!suppressNextClick) return;
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }
+
   function onClickCapture(e) {
     if (suppressNextClick) {
       e.stopPropagation();
       e.stopImmediatePropagation();
       e.preventDefault();
       suppressNextClick = false;
+      if (suppressClickTimer) {
+        clearTimeout(suppressClickTimer);
+        suppressClickTimer = null;
+      }
     }
   }
 
-  // Context Menu Interception for Right-Click drag (Capture Phase)
   function onContextMenuCapture(e) {
-    if (suppressNextContextMenu) {
+    const blockForRightDrag = config.dragTrigger === 'right' && (isPointerDown || isDragging);
+    if (suppressNextContextMenu || isDragging || blockForRightDrag) {
       e.stopPropagation();
       e.stopImmediatePropagation();
       e.preventDefault();
-      suppressNextContextMenu = false;
+      if (suppressNextContextMenu) {
+        suppressNextContextMenu = false;
+        if (suppressContextTimer) {
+          clearTimeout(suppressContextTimer);
+          suppressContextTimer = null;
+        }
+      }
     }
   }
 
-  // Initialize event listeners
+  function clampNativeSliderHandle() {
+    if (!activePlayer) return;
+    const handle = activePlayer.querySelector('.ytp-volume-slider-handle');
+    if (handle && handle.style && handle.style.left) {
+      const leftVal = parseFloat(handle.style.left);
+      const maxLimit = getSliderHandleMax();
+      if (Number.isFinite(leftVal) && leftVal > maxLimit) {
+        handle.style.left = `${maxLimit.toFixed(1)}px`;
+      }
+    }
+  }
+
   function init() {
     loadConfig();
 
-    // Global window listeners with capture
-    window.addEventListener('mousedown', onMouseDown, true);
-    window.addEventListener('mousemove', onMouseMove, { passive: false, capture: true });
-    window.addEventListener('mouseup', onMouseUp, true);
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointermove', onPointerMove, { passive: false, capture: true });
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerUp, true);
+    window.addEventListener('lostpointercapture', onLostPointerCapture, true);
+    window.addEventListener('mouseup', onCompatMouseUp, true);
     window.addEventListener('click', onClickCapture, true);
+    window.addEventListener('auxclick', onClickCapture, true);
     window.addEventListener('contextmenu', onContextMenuCapture, true);
-    window.addEventListener('keydown', onKeyDown, true);
-    window.addEventListener('wheel', onWheel, { passive: true, capture: true });
 
-    // Native slider interaction tracking listeners
-    window.addEventListener('pointerdown', onGlobalPointerDown, true);
-    window.addEventListener('pointerup', onGlobalPointerUp, true);
-    window.addEventListener('touchstart', onGlobalPointerDown, { passive: true, capture: true });
-    window.addEventListener('touchend', onGlobalPointerUp, { passive: true, capture: true });
+    window.addEventListener('pointermove', clampNativeSliderHandle, { passive: true, capture: true });
 
-    // Tab Switch & Visibility Change Listeners
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         onTabInactive();
       }
     });
-    window.addEventListener('blur', onTabInactive);
 
-    // Dynamic SPA Navigation handling
     window.addEventListener('yt-navigate-finish', () => {
       setTimeout(ensureHUD, 100);
     });
@@ -729,21 +751,14 @@
       setTimeout(ensureHUD, 100);
     });
 
-    // Resize listener to invalidate cached geometry
     window.addEventListener('resize', () => {
       if (activePlayer) {
         cachedPlayerRect = activePlayer.getBoundingClientRect();
       }
     }, { passive: true });
 
-    // Early MutationObserver to catch video initialization (excluding inline thumbnail previews)
     const observer = new MutationObserver(() => {
-      const { video } = getPlayerElements();
-      if (video && !video.__ytVolEarlyInit && !isInlinePreview(video)) {
-        video.__ytVolEarlyInit = true;
-        applyEarlyVolumeToVideo(video);
-      }
-      ensureHUD();
+      scheduleEnsureHUD();
     });
     observer.observe(document.documentElement, {
       childList: true,
