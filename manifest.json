@@ -1,43 +1,56 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Viewport Volume Drag",
-  "version": "1.0.0",
-  "description": "Adjust YouTube video volume by smoothly dragging your mouse horizontally across the viewport with a sleek modern visualizer.",
+  "name": "YouTube Toolkit",
+  "version": "1.0.1",
+  "description": "Volume drag, layout trimmer, and auto Jump Ahead — three YouTube tools in one extension, each with its own toggle.",
   "permissions": [
-    "storage"
+    "storage",
+    "activeTab"
   ],
   "host_permissions": [
     "*://*.youtube.com/*"
   ],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_icon": "icon.png"
+    "default_title": "YouTube Toolkit",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "icons": {
-    "128": "icon.png"
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "content_scripts": [
     {
-      "matches": [
-        "*://*.youtube.com/*"
-      ],
-      "js": [
-        "content/main_bridge.js"
-      ],
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["features/volume/main_bridge.js"],
       "world": "MAIN",
       "run_at": "document_start"
     },
     {
-      "matches": [
-        "*://*.youtube.com/*"
-      ],
-      "css": [
-        "content/styles.css"
-      ],
+      "matches": ["*://*.youtube.com/*"],
+      "css": ["features/volume/styles.css"],
       "js": [
-        "content/visualizer.js",
-        "content/content.js"
+        "features/volume/visualizer.js",
+        "features/volume/content.js"
       ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "css": ["features/trimmer/content.css"],
+      "js": ["features/trimmer/content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["features/skipit/content.js"],
       "run_at": "document_start"
     }
   ]

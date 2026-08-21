@@ -1,13 +1,21 @@
-# YouTube Viewport Volume Drag
+# YouTube Toolkit
 
-Adjust YouTube video volume by dragging horizontally across the viewport.
+Volume drag, layout trimmer, and auto Jump Ahead — three YouTube tools in one Chrome extension.
 
 ---
 
 ## ✨ Features
 
-- **Horizontal Drag Control**: Drag horizontally across the video to adjust volume.
-- **Visualizer HUD**: A floating volume bar and waveform displayed directly above your mouse cursor.
+- **Volume Drag**: Drag horizontally across the video to adjust volume, with a floating HUD visualizer above your cursor.
+- **Layout Trimmer**: Narrow YouTube’s extra-wide layout, resize the suggested-videos sidebar, and align the page (left / center / right).
+- **SkipIt**: After a single skip keypress (Right Arrow or L), automatically click YouTube’s native **Jump ahead** button.
+- **Toggles**: Turn any one feature on, or use the header switch to turn everything on or off.
+
+Layout Trimmer shortcuts:
+
+- `Alt + [`: Decrease width by 50px
+- `Alt + ]`: Increase width by 50px
+- `Alt + \`: Toggle layout trimmer ON / OFF
 
 ---
 
@@ -18,7 +26,7 @@ Adjust YouTube video volume by dragging horizontally across the viewport.
 3. Open Google Chrome (or Edge / Brave / Opera) and go to `chrome://extensions/`.
 4. Turn ON **Developer mode** using the toggle in the top-right corner.
 5. Click **Load unpacked** in the top-left corner and select the unzipped folder.
-6. **Refresh YouTube (`F5`)** if you already had a tab open, then drag your mouse across any video to adjust volume.
+6. **Refresh YouTube (`F5`)** if you already had a tab open, then click the extension icon to choose which features to use.
 
 ---
 
