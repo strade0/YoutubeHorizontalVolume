@@ -125,9 +125,9 @@ html[data-yt-trimmer-enabled="true"] ytd-watch-flexy:not([theater]):not([fullscr
   right: 0 !important;
 }
 
-html[data-yt-trimmer-enabled="true"] ytd-watch-flexy:not([theater]):not([fullscreen]) .ytp-progress-bar-container,
-html[data-yt-trimmer-enabled="true"] ytd-watch-flexy:not([theater]):not([fullscreen]) .ytp-chapter-hover-container,
-html[data-yt-trimmer-enabled="true"] ytd-watch-flexy:not([theater]):not([fullscreen]) .ytp-timed-markers-container {
+/* Only the outer bar — chapter hover containers must keep YouTube's per-chapter
+   pixel widths or every chapter paints a full-width duplicate red timeline. */
+html[data-yt-trimmer-enabled="true"] ytd-watch-flexy:not([theater]):not([fullscreen]) .ytp-chrome-bottom .ytp-progress-bar-container {
   width: 100% !important;
   max-width: 100% !important;
 }
